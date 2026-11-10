@@ -5,11 +5,16 @@ Includes:
 2. OneEuroFilter: 1-D adaptive cutoff low-pass filter (Casiez et al., CHI 2012).
 3. Point2DOneEuroFilter: Isotropic 2-D One-Euro filter with unified velocity estimation,
    sub-pixel deadband gating, and duplicate-timestamp protection.
-4. CursorBallistics: Human-factors-tuned precision damping & optional edge-easing remapper.
+4. Point2DEMAFilter: 2-D Exponential Moving Average baseline for comparative signal analysis.
+5. Point2DKalmanFilter: 2-D Constant-Velocity linear Kalman Filter ([x, y, vx, vy]^T)
+   for comparative evaluation against adaptive One-Euro filtering.
+6. CursorBallistics: Human-factors-tuned precision damping & optional edge-easing remapper.
 """
 
 import math
 from typing import Optional, Tuple
+
+import numpy as np
 
 
 class LowPassFilter:
@@ -168,6 +173,106 @@ class Point2DOneEuroFilter:
         self._filter_dy.reset()
         self._last_time_s = None
         self._last_output = None
+
+
+class Point2DEMAFilter:
+    """2-D Exponential Moving Average (EMA) filter for comparative benchmarking."""
+
+    def __init__(self, alpha: float = 0.25):
+        self.alpha = max(1e-4, min(1.0, alpha))
+        self._fx = LowPassFilter(self.alpha)
+        self._fy = LowPassFilter(self.alpha)
+
+    def filter(self, x: float, y: float, timestamp_s: float = 0.0) -> Tuple[float, float]:
+        return (self._fx.apply(x, self.alpha), self._fy.apply(y, self.alpha))
+
+    def reset(self) -> None:
+        self._fx.reset()
+        self._fy.reset()
+
+
+class Point2DKalmanFilter:
+    """2-D Constant-Velocity Linear Kalman Filter for cursor tracking & benchmarking.
+
+    State vector: [x, y, vx, vy]^T
+    Measurement vector: [x, y]^T
+    """
+
+    def __init__(
+        self,
+        process_noise: float = 150.0,
+        measurement_noise: float = 2.5,
+    ):
+        self.process_noise = process_noise
+        self.measurement_noise = measurement_noise
+        self._state: Optional[np.ndarray] = None
+        self._cov: Optional[np.ndarray] = None
+        self._last_time_s: Optional[float] = None
+        self._H = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=np.float64)
+        self._R = np.eye(2, dtype=np.float64) * (measurement_noise ** 2)
+        self._I = np.eye(4, dtype=np.float64)
+
+    def filter(self, x: float, y: float, timestamp_s: float) -> Tuple[float, float]:
+        z = np.array([x, y], dtype=np.float64)
+        if self._state is None or self._cov is None or self._last_time_s is None:
+            self._state = np.array([x, y, 0.0, 0.0], dtype=np.float64)
+            self._cov = np.eye(4, dtype=np.float64) * 10.0
+            self._last_time_s = timestamp_s
+            return (float(x), float(y))
+
+        dt = timestamp_s - self._last_time_s
+        if dt <= 1e-6:
+            return (float(self._state[0]), float(self._state[1]))
+
+        dt = min(dt, 0.2)
+        self._last_time_s = timestamp_s
+
+        # State transition matrix F
+        F = np.array(
+            [
+                [1.0, 0.0, dt, 0.0],
+                [0.0, 1.0, 0.0, dt],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+
+        # Continuous white noise acceleration model Q (spectral density = process_noise^2)
+        dt2 = dt * dt
+        dt3 = dt2 * dt * 0.5
+        dt4 = dt2 * dt2 * 0.25
+        Q = (
+            np.array(
+                [
+                    [dt4, 0.0, dt3, 0.0],
+                    [0.0, dt4, 0.0, dt3],
+                    [dt3, 0.0, dt2, 0.0],
+                    [0.0, dt3, 0.0, dt2],
+                ],
+                dtype=np.float64,
+            )
+            * (self.process_noise ** 2)
+        )
+
+        # Predict
+        x_pred = F @ self._state
+        P_pred = F @ self._cov @ F.T + Q
+
+        # Update
+        y_res = z - (self._H @ x_pred)
+        S = self._H @ P_pred @ self._H.T + self._R
+        K = P_pred @ self._H.T @ np.linalg.inv(S)
+
+        self._state = x_pred + (K @ y_res)
+        self._cov = (self._I - (K @ self._H)) @ P_pred
+
+        return (float(self._state[0]), float(self._state[1]))
+
+    def reset(self) -> None:
+        self._state = None
+        self._cov = None
+        self._last_time_s = None
 
 
 class CursorBallistics:

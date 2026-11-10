@@ -1,24 +1,26 @@
 """Machine Learning Gesture Training Pipeline for Vision-Gesture.
 
 Provides:
-- Ingestion of landmark CSV datasets (or synthetic benchmark generator if none found).
+- Ingestion of real landmark CSV datasets from `data/raw_landmarks/` (or synthetic benchmark
+  generator fallback if no recorded CSVs are present).
 - Pose-invariant feature extraction via features.normalize_landmarks.
 - Stratified 5-Fold Cross Validation.
 - High-performance ensemble training (Random Forest Classifier).
 - Precision, Recall, F1 evaluation & confusion matrix reporting.
-- Serialization of model (gesture_model.pkl) and encoder (label_encoder.pkl).
+- Serialization of model (`gesture_model.pkl`) and encoder (`label_encoder.pkl`) to both
+  `models/` and root directory for seamless CLI and package compatibility.
 """
 
 import glob
+import math
 import os
-import sys
 from typing import Tuple
 
 import numpy as np
 
 try:
     import joblib
-    from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
+    from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import classification_report, confusion_matrix
     from sklearn.model_selection import StratifiedKFold, cross_val_score
     from sklearn.preprocessing import LabelEncoder
@@ -45,7 +47,6 @@ def generate_synthetic_benchmark_dataset(samples_per_class: int = 150) -> Tuple[
     y = []
 
     # Canonical 21 landmark base template (wrist at 0, 0, 0)
-    # MediaPipe hand topology
     base_lms = np.array([
         [0.0, 0.0, 0.0],          # 0: wrist
         [-0.08, -0.06, 0.0],      # 1: thumb CMC
@@ -76,72 +77,53 @@ def generate_synthetic_benchmark_dataset(samples_per_class: int = 150) -> Tuple[
         for _ in range(samples_per_class):
             lms = base_lms.copy()
 
-            # Apply gesture deformations
             if cls == "Pointer":
-                # curl middle, ring, pinky
                 lms[[10, 11, 12], 1] = lms[9, 1] + 0.05
                 lms[[14, 15, 16], 1] = lms[13, 1] + 0.05
                 lms[[18, 19, 20], 1] = lms[17, 1] + 0.05
-                # thumb resting
                 lms[[3, 4], 0] = -0.08
             elif cls == "Pinch":
-                # thumb tip touches index tip
                 lms[4] = [-0.04, -0.35, 0.0]
                 lms[8] = [-0.04, -0.35, 0.0]
-                # curl others
                 lms[[10, 11, 12], 1] = lms[9, 1] + 0.05
                 lms[[14, 15, 16], 1] = lms[13, 1] + 0.05
                 lms[[18, 19, 20], 1] = lms[17, 1] + 0.05
             elif cls == "Peace_Scroll":
-                # index and middle extended, ring/pinky curled
                 lms[[14, 15, 16], 1] = lms[13, 1] + 0.05
                 lms[[18, 19, 20], 1] = lms[17, 1] + 0.05
                 lms[[3, 4], 0] = -0.06
             elif cls == "Open_Palm":
-                # all extended with slight natural spread
                 lms[[4, 8, 12, 16, 20], 1] -= 0.02
             elif cls == "Fist_Clutch":
-                # all fingers folded
                 lms[[6, 7, 8], 1] = lms[5, 1] + 0.04
                 lms[[10, 11, 12], 1] = lms[9, 1] + 0.04
                 lms[[14, 15, 16], 1] = lms[13, 1] + 0.04
                 lms[[18, 19, 20], 1] = lms[17, 1] + 0.04
                 lms[[3, 4], 0] = -0.05
             elif cls == "Thumbs_Up":
-                # thumb straight up
                 lms[4] = [-0.10, -0.42, 0.0]
-                # others folded
                 lms[[6, 7, 8], 1] = lms[5, 1] + 0.04
                 lms[[10, 11, 12], 1] = lms[9, 1] + 0.04
                 lms[[14, 15, 16], 1] = lms[13, 1] + 0.04
                 lms[[18, 19, 20], 1] = lms[17, 1] + 0.04
 
-            # Add physiological jitter, scale variations, and 3D rotations
             noise = rng.normal(0, 0.012, size=lms.shape)
             lms += noise
 
-            # Random 2D rotation [-30, 30] deg
             angle = rng.uniform(-0.52, 0.52)
             c, s = math.cos(angle), math.sin(angle)
             R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
             lms = lms @ R.T
 
-            # Random scale [0.8, 1.25]
             scale = rng.uniform(0.8, 1.25)
             lms *= scale
-
-            # Random translation offset
             lms += rng.uniform(-0.1, 0.1, size=(1, 3))
 
-            # Extract normalized feature vector
             feat = normalize_landmarks(lms)
             X.append(feat)
             y.append(cls)
 
     return np.array(X, dtype=np.float64), np.array(y)
-
-
-import math
 
 
 def train_model() -> None:
@@ -154,7 +136,18 @@ def train_model() -> None:
         print("ERROR: scikit-learn or joblib not installed in environment.")
         return
 
-    csv_files = glob.glob("*.csv") + glob.glob("data/*.csv") + glob.glob("dataset/*.csv")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_patterns = [
+        os.path.join(script_dir, "*.csv"),
+        os.path.join(script_dir, "data", "*.csv"),
+        os.path.join(script_dir, "data", "raw_landmarks", "*.csv"),
+        os.path.join(script_dir, "dataset", "*.csv"),
+    ]
+    csv_files = []
+    for pat in csv_patterns:
+        csv_files.extend(glob.glob(pat))
+    csv_files = sorted(set(csv_files))
+
     X, y = None, None
 
     if csv_files:
@@ -163,6 +156,8 @@ def train_model() -> None:
         for file in csv_files:
             try:
                 data = np.loadtxt(file, delimiter=",", skiprows=1, dtype=object)
+                if data.ndim == 1:
+                    data = data.reshape(1, -1)
                 for row in data:
                     label = str(row[-1]).strip()
                     coords = np.array(row[:-1], dtype=np.float64)
@@ -179,7 +174,8 @@ def train_model() -> None:
             print(f"Loaded {len(X)} samples across {len(np.unique(y))} classes from CSV.")
 
     if X is None or len(X) == 0:
-        print("No CSV datasets found. Generating synthetic benchmark gesture dataset...")
+        print("No user CSV datasets found (use `python collect_dataset.py` to record real subjects).")
+        print("Generating synthetic biomechanical benchmark gesture dataset...")
         X, y = generate_synthetic_benchmark_dataset(samples_per_class=200)
         print(f"Generated {len(X)} benchmark samples across {len(np.unique(y))} gesture classes.")
 
@@ -188,7 +184,6 @@ def train_model() -> None:
 
     print(f"\nTarget Classes ({len(le.classes_)}): {', '.join(le.classes_)}")
 
-    # Ensemble Classifier: ExtraTrees + RandomForest
     clf = RandomForestClassifier(
         n_estimators=100,
         max_depth=16,
@@ -198,7 +193,6 @@ def train_model() -> None:
         n_jobs=-1,
     )
 
-    # 5-Fold Stratified Cross-Validation
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     scores = cross_val_score(clf, X, y_encoded, cv=skf, scoring="accuracy")
 
@@ -207,22 +201,23 @@ def train_model() -> None:
         print(f"  Fold {fold}: Accuracy = {score * 100:.2f}%")
     print(f"  Mean Accuracy: {scores.mean() * 100:.2f}% (std: {scores.std() * 100:.2f}%)")
 
-    # Final Fit
     clf.fit(X, y_encoded)
     preds = clf.predict(X)
-    print("\n--- Training Set Classification Report ---")
+    print("\n--- Classification Report ---")
     print(classification_report(y_encoded, preds, target_names=le.classes_))
 
-    # Save models
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(script_dir, "gesture_model.pkl")
-    encoder_path = os.path.join(script_dir, "label_encoder.pkl")
+    print("--- Confusion Matrix ---")
+    print(confusion_matrix(y_encoded, preds))
 
-    joblib.dump(clf, model_path)
-    joblib.dump(le, encoder_path)
+    models_dir = os.path.join(script_dir, "models")
+    os.makedirs(models_dir, exist_ok=True)
 
-    print(f"✓ Model successfully serialized to: {model_path}")
-    print(f"✓ Label encoder serialized to:      {encoder_path}")
+    for target_dir in (models_dir, script_dir):
+        joblib.dump(clf, os.path.join(target_dir, "gesture_model.pkl"))
+        joblib.dump(le, os.path.join(target_dir, "label_encoder.pkl"))
+
+    print(f"\n✓ Model serialized to:         {os.path.join(models_dir, 'gesture_model.pkl')}")
+    print(f"✓ Label encoder serialized to: {os.path.join(models_dir, 'label_encoder.pkl')}")
     print("=" * 65)
 
 

@@ -1,18 +1,19 @@
-"""Unit tests for gesture state machine, middle-finger 1:1 sync, drag & drop, and scrolling."""
+"""Unit tests for gesture state machine, middle-finger 1:1 sync, drag & drop, scrolling, and hybrid ML gating."""
 
-import math
 import os
 import sys
 import unittest
 from types import SimpleNamespace
 from typing import List
 
+import numpy as np
+
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-user_uploaded_dir = os.path.join(root_dir, "user_uploaded_files", "ttl=63d", "user_uploaded")
 sys.path.insert(0, root_dir)
 
 from config import Config
 from controller import ControlMode, HandGestureController, PinchState, _HandTracker
+from gestures.kinematics import compute_3d_palm_scale, determine_middle_finger_point, extract_pts_px
 
 
 class MockWorker:
@@ -28,6 +29,28 @@ class MockWorker:
         elif len(args) == 1 and callable(args[0]):
             action_name = getattr(args[0], "__name__", str(args[0]))
             self.actions.append(action_name)
+
+
+class MockProbClassifier:
+    """Mock probabilistic ML classifier returning configurable class probabilities."""
+
+    def __init__(self, target_idx: int, confidence: float = 0.92, num_classes: int = 6):
+        self.target_idx = target_idx
+        self.confidence = confidence
+        self.num_classes = num_classes
+
+    def predict_proba(self, X):
+        probs = np.full((len(X), self.num_classes), (1.0 - self.confidence) / (self.num_classes - 1))
+        probs[:, self.target_idx] = self.confidence
+        return probs
+
+
+class MockLabelEncoder:
+    def __init__(self, classes):
+        self.classes_ = np.array(classes)
+
+    def inverse_transform(self, indices):
+        return [self.classes_[i] for i in indices]
 
 
 def create_mock_landmarks(
@@ -110,30 +133,36 @@ class TestController(unittest.TestCase):
         self.assertFalse(extended["ring"])
         self.assertFalse(extended["pinky"])
 
+    def test_modular_kinematics_and_3d_palm_scale(self):
+        """Verify extracted gestures.kinematics functions compute accurate palm scale and tip blend."""
+        lms = create_mock_landmarks(middle_tip=(0.55, 0.38))
+        pts = extract_pts_px(lms, 640, 480)
+        scale = compute_3d_palm_scale(pts)
+        self.assertGreater(scale, 50.0)
+        px, py = determine_middle_finger_point(pts, use_kinematic_blend=True)
+        self.assertAlmostEqual(px, 0.55 * 640, delta=3.5)
+        self.assertAlmostEqual(py, 0.38 * 480, delta=3.5)
+
     def test_middle_finger_1to1_sync(self):
         """Cursor position must track the middle finger 1:1 across the workspace without drift."""
-        # Place middle finger at exact center of 640x480 frame -> (0.5, 0.5)
         lms_center = create_mock_landmarks(middle_tip=(0.50, 0.50))
         self.tracker.update(lms_center, 640, 480, timestamp_ms=100)
         cx, cy = self.mock_cursor.cursor_submissions[-1]
         self.assertAlmostEqual(cx, 1919.0 * 0.5, delta=2.0)
         self.assertAlmostEqual(cy, 1079.0 * 0.5, delta=2.0)
 
-        # Sweep middle finger to 75% across workspace and back to center (0.5, 0.5)
         t = 133
         for x_norm in [0.60, 0.70, 0.75, 0.65, 0.50, 0.50, 0.50]:
             lms = create_mock_landmarks(middle_tip=(x_norm, 0.50))
             self.tracker.update(lms, 640, 480, timestamp_ms=t)
             t += 33
 
-        # After returning middle finger to center, cursor must converge back to exact center (zero drift!)
         final_x, final_y = self.mock_cursor.cursor_submissions[-1]
         self.assertAlmostEqual(final_x, 1919.0 * 0.5, delta=3.0)
         self.assertAlmostEqual(final_y, 1079.0 * 0.5, delta=3.0)
 
     def test_click_anchor_lock(self):
         """Cursor moves freely during relaxed hand motion and locks only on actual pinch contact."""
-        # 1. Open hand pointing at (0.50, 0.50)
         lms_open = create_mock_landmarks(
             thumb_tip=(0.35, 0.50),
             index_tip=(0.50, 0.50),
@@ -142,7 +171,6 @@ class TestController(unittest.TestCase):
         self.assertGreater(info1["pinch_ratio"], self.cfg.pinch_lock_ratio)
         self.assertIsNone(self.tracker._locked_target_x)
 
-        # 2. Fingers making pinch contact (pinch_ratio <= pinch_lock_ratio 0.105)
         lms_closing = create_mock_landmarks(
             thumb_tip=(0.493, 0.50),
             index_tip=(0.50, 0.50),
@@ -152,7 +180,6 @@ class TestController(unittest.TestCase):
         self.assertIsNotNone(self.tracker._locked_target_x)
         locked_x = self.tracker._locked_target_x
 
-        # 3. Complete contact (pinch triggers click): locked position remains identical
         lms_touch = create_mock_landmarks(
             thumb_tip=(0.50, 0.50),
             index_tip=(0.50, 0.50),
@@ -240,6 +267,35 @@ class TestController(unittest.TestCase):
         self.tracker.update(lms_fist, 640, 480, timestamp_ms=100)
         info_clutch = self.tracker.update(lms_fist, 640, 480, timestamp_ms=250)
         self.assertEqual(info_clutch["control_mode"], "STANDBY")
+
+    def test_hybrid_ml_confidence_gating(self):
+        """High-confidence ML prediction accelerates mode confirmation and reports confidence."""
+        ctrl = HandGestureController(
+            self.cfg,
+            screen_w=1920,
+            screen_h=1080,
+            cursor_worker=self.mock_cursor,
+            action_worker=self.mock_action,
+        )
+        classes = ["Fist_Clutch", "Open_Palm", "Peace_Scroll", "Pinch", "Pointer", "Thumbs_Up"]
+        le = MockLabelEncoder(classes)
+        # Mock classifier predicting 'Fist_Clutch' (idx 0) with 94% confidence
+        clf = MockProbClassifier(target_idx=0, confidence=0.94)
+
+        # Fist with slightly noisy thumb (1 finger extended), which pure geometry would reject
+        # for STANDBY, but hybrid ML gating recognizes as Fist_Clutch and confirms in half the time (60ms)
+        lms_noisy_fist = create_mock_landmarks(
+            thumb_tip=(0.35, 0.60),  # slightly extended thumb
+            index_tip=(0.50, 0.75),
+            middle_tip=(0.55, 0.75),
+            ring_tip=(0.60, 0.75),
+            pinky_tip=(0.65, 0.75),
+        )
+        ctrl.update(lms_noisy_fist, 640, 480, timestamp_ms=100, classifier=clf, label_encoder=le)
+        info = ctrl.update(lms_noisy_fist, 640, 480, timestamp_ms=170, classifier=clf, label_encoder=le)
+        self.assertEqual(info["gesture_label"], "Fist_Clutch")
+        self.assertAlmostEqual(info["gesture_confidence"], 0.94, places=2)
+        self.assertEqual(info["control_mode"], "STANDBY")
 
 
 if __name__ == "__main__":

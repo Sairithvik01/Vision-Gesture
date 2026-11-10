@@ -2,8 +2,10 @@
 
 Usage
 -----
-  python main.py          # launch real-time hand-gesture controller
-  python main.py --train  # train ML gesture classifier on landmark dataset
+  python main.py                  # launch real-time hand-gesture controller
+  python main.py --train          # train ML gesture classifier on landmark dataset
+  python main.py --benchmark      # run signal processing & controller throughput study
+  python main.py --fitts-law      # run ISO 9241-9 Fitts' Law HCI target evaluation
 """
 
 import argparse
@@ -38,6 +40,19 @@ except ImportError:
     train_model = None
 
 
+def _resolve_artifact(filename: str) -> str:
+    """Locate artifact in models/ directory or root project directory."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, "models", filename),
+        os.path.join(script_dir, filename),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return os.path.join(script_dir, filename)
+
+
 def main(custom_cfg: Optional[Config] = None) -> None:
     cfg = custom_cfg or Config()
 
@@ -60,18 +75,16 @@ def main(custom_cfg: Optional[Config] = None) -> None:
     fps_last = time.perf_counter()
     fps_frames = 0
 
-    # ── Optional Machine Learning Classifier ─────────────────────────────────
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     clf = None
     le = None
     try:
         import joblib
-        model_path = os.path.join(script_dir, "gesture_model.pkl")
-        encoder_path = os.path.join(script_dir, "label_encoder.pkl")
+        model_path = _resolve_artifact("gesture_model.pkl")
+        encoder_path = _resolve_artifact("label_encoder.pkl")
         if os.path.exists(model_path) and os.path.exists(encoder_path):
             clf = joblib.load(model_path)
             le = joblib.load(encoder_path)
-            print(f"✓ Gesture classifier loaded ({', '.join(le.classes_)})")
+            print(f"✓ Hybrid ML Gesture classifier loaded ({', '.join(le.classes_)})")
         else:
             print("  [Info] No gesture_model.pkl found — run with --train to enable live classification.")
     except ImportError:
@@ -90,7 +103,8 @@ def main(custom_cfg: Optional[Config] = None) -> None:
 
         print("\n" + "=" * 64)
         print(" Vision-Gesture Active | Tier-1 HCI Capstone Controller")
-        print(" - 1:1 Middle-Finger Kinematic Tracking")
+        print(" - 1:1 Middle-Finger Kinematic Tracking (2D Isotropic One-Euro)")
+        print(" - Hybrid Probabilistic-Deterministic ML State Gating")
         print(" - 2-Hand Mode: Right Hand = Cursor | Left Hand = Actions Only")
         print(" Press 'q' in video window to exit.")
         print("=" * 64 + "\n")
@@ -187,7 +201,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--train",
         action="store_true",
-        help="Train the ensemble gesture classification model and save weights",
+        help="Train the gesture classification model on landmark CSV data",
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Run comparative signal processing and throughput benchmarks",
+    )
+    parser.add_argument(
+        "--fitts-law",
+        action="store_true",
+        help="Run ISO 9241-9 Fitts' Law HCI target acquisition study",
+    )
+    parser.add_argument(
+        "--filter",
+        type=str,
+        default="one_euro",
+        choices=["one_euro", "kalman", "ema"],
+        help="Select cursor smoothing filter architecture (default: one_euro)",
     )
     args = parser.parse_args()
 
@@ -195,6 +226,13 @@ if __name__ == "__main__":
         if train_model is not None:
             train_model()
         else:
-            print("ERROR: Training module not found or scikit-learn is missing.")
+            print("Error: train.py or scikit-learn dependencies not available.")
+    elif args.benchmark:
+        from benchmark_performance import run_all_benchmarks
+        run_all_benchmarks()
+    elif args.fitts_law:
+        from fitts_law_evaluator import run_fitts_law_study
+        run_fitts_law_study(interactive=False)
     else:
-        main()
+        custom_cfg = Config(filter_type=args.filter)
+        main(custom_cfg)

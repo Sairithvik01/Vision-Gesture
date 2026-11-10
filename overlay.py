@@ -6,7 +6,7 @@ Features:
   and Left Hand (Actions Only — no cursor reticle on Left middle finger).
 - Dynamic pinch meters (Left & Right) with threshold progress indicators.
 - Proportional scroll velocity meter with directional indicators.
-- Motion anchor reticle and active workspace boundary with corner brackets.
+- Hybrid ML-FSM classification & probability telemetry badge.
 """
 
 import math
@@ -324,16 +324,18 @@ def draw_overlay(frame: np.ndarray, cfg: Config, info: Optional[dict], fps: floa
             cv2.FONT_HERSHEY_SIMPLEX, 0.43, (0, 220, 255), 1, cv2.LINE_AA,
         )
 
-        # ML Gesture Classification Badge
+        # Hybrid ML Gesture Classification & Confidence Badge
         label = info.get("gesture_label")
+        conf = info.get("gesture_confidence", 0.0)
         if label:
-            _draw_glass_panel(frame, w - 180, h - 45, w - 10, h - 10, alpha=0.65)
+            badge_text = f"ML: {label} ({conf * 100:.0f}%)" if conf > 0 else f"ML: {label}"
+            _draw_glass_panel(frame, w - 235, h - 45, w - 10, h - 10, alpha=0.65)
             cv2.putText(
                 frame,
-                f"ML: {label}",
-                (w - 170, h - 22),
+                badge_text,
+                (w - 225, h - 22),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                0.50,
                 (0, 255, 160),
                 1,
                 cv2.LINE_AA,

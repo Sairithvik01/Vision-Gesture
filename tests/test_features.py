@@ -7,9 +7,9 @@ import unittest
 import numpy as np
 
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-user_uploaded_dir = os.path.join(root_dir, "user_uploaded_files", "ttl=63d", "user_uploaded")
+
 sys.path.insert(0, root_dir)
-sys.path.insert(0, user_uploaded_dir)
+
 
 from features import normalize_landmarks
 

@@ -11,16 +11,13 @@ def _resolve_default_model_path() -> str:
     if env_path and os.path.exists(env_path):
         return env_path
 
-    # 2. Candidate locations relative to project root or user home
+    # 2. Candidate locations relative to project root or working directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join(script_dir, "hand_landmarker.task"),
         os.path.join(script_dir, "models", "hand_landmarker.task"),
-        os.path.join(os.getcwd(), "hand_landmarker.task"),
+        os.path.join(script_dir, "hand_landmarker.task"),
         os.path.join(os.getcwd(), "models", "hand_landmarker.task"),
-        os.path.expanduser("~/Desktop/Python/Vision-Gesture/hand_landmarker.task"),
-        os.path.expanduser("~/Documents/Python/Vision-Gesture/hand_landmarker.task"),
-        "C:/Users/bathi/OneDrive/Documents/Desktop/Python/Vision-Gesture/hand_landmarker.task",
+        os.path.join(os.getcwd(), "hand_landmarker.task"),
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -57,6 +54,11 @@ class Config:
     cursor_d_cutoff: float = 1.2
     deadband_px: float = 0.5
     min_move_px: float = 0.1
+
+    # Filter selection ("one_euro", "kalman", or "ema")
+    filter_type: str = "one_euro"
+    kalman_process_noise: float = 150.0
+    kalman_measurement_noise: float = 2.5
 
     # Multi-point kinematic middle-finger position determination (uses landmarks 9, 10, 11, 12)
     middle_finger_kinematic_blend: bool = True
@@ -118,8 +120,12 @@ class Config:
     display: bool = True
     show_fps: bool = True
 
+    # ── Hybrid Deterministic-Probabilistic ML Gating ────────────────────────
     # Interval for ML gesture classifier inference (frames).
     gesture_infer_every: int = 3
+    hybrid_ml_gating: bool = True
+    ml_confidence_threshold: float = 0.65
+    ml_fast_confirm_ratio: float = 0.50
 
     # ── Proportional Smooth Scrolling ───────────────────────────────────────
     # Activated when index + middle extended, ring + pinky folded.

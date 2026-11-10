@@ -1,18 +1,28 @@
-"""Unit tests for signal processing filters, One-Euro adaptive filter, and cursor ballistics."""
+"""Unit tests for signal processing filters, One-Euro, Kalman, EMA, and Fitts' Law metrics."""
 
 import math
 import os
 import sys
 import unittest
+
 import numpy as np
 
-# Ensure module import works across both dev workspace and user_uploaded directory
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-user_uploaded_dir = os.path.join(root_dir, "user_uploaded_files", "ttl=63d", "user_uploaded")
 sys.path.insert(0, root_dir)
-sys.path.insert(0, user_uploaded_dir)
 
-from filters import CursorBallistics, LowPassFilter, OneEuroFilter, Point2DOneEuroFilter
+from filters import (
+    CursorBallistics,
+    LowPassFilter,
+    OneEuroFilter,
+    Point2DEMAFilter,
+    Point2DKalmanFilter,
+    Point2DOneEuroFilter,
+)
+from fitts_law_evaluator import (
+    compute_fitts_throughput,
+    compute_shannon_id,
+    generate_iso9241_ring_targets,
+)
 
 
 class TestFilters(unittest.TestCase):
@@ -68,6 +78,47 @@ class TestFilters(unittest.TestCase):
         # Larger motion (15 px > deadband)
         fx3, fy3 = filt.filter(215.0, 215.0, 0.066)
         self.assertGreater(fx3, 200.0)
+
+    def test_point2d_kalman_filter_tracking_and_noise_reduction(self):
+        """2D Constant-Velocity Kalman Filter should suppress stationary noise and track linear ramps."""
+        kf = Point2DKalmanFilter(process_noise=120.0, measurement_noise=2.5)
+        rng = np.random.default_rng(77)
+        t = 0.0
+        xs = []
+        for _ in range(50):
+            ox, _ = kf.filter(300.0 + rng.normal(0, 2.0), 400.0 + rng.normal(0, 2.0), t)
+            xs.append(ox)
+            t += 1.0 / 30.0
+        self.assertLess(np.std(xs[15:]), 1.2)
+
+        # Linear ramp tracking
+        kf.reset()
+        t = 0.0
+        for i in range(20):
+            ox, oy = kf.filter(i * 25.0, i * 15.0, t)
+            t += 1.0 / 30.0
+        self.assertGreater(ox, 350.0)
+        self.assertGreater(oy, 200.0)
+
+    def test_point2d_ema_filter(self):
+        """2D EMA filter should exponentially smooth coordinates."""
+        ema = Point2DEMAFilter(alpha=0.25)
+        x0, y0 = ema.filter(100.0, 200.0, 0.0)
+        self.assertEqual((x0, y0), (100.0, 200.0))
+        x1, y1 = ema.filter(200.0, 300.0, 0.033)
+        self.assertAlmostEqual(x1, 125.0)
+        self.assertAlmostEqual(y1, 225.0)
+
+    def test_fitts_law_shannon_metrics(self):
+        """Verify ISO 9241-9 Shannon formulation ID = log2(D/W + 1) and Throughput calculation."""
+        # D = 300, W = 100 -> ID = log2(3 + 1) = 2.0 bits
+        id_bits = compute_shannon_id(300.0, 100.0)
+        self.assertAlmostEqual(id_bits, 2.0)
+        tp = compute_fitts_throughput(id_bits, 0.5)
+        self.assertAlmostEqual(tp, 4.0)
+
+        ring = generate_iso9241_ring_targets(500.0, 500.0, 200.0, num_targets=11)
+        self.assertEqual(len(ring), 11)
 
     def test_cursor_ballistics(self):
         ballistics = CursorBallistics(precision_gain=0.85, ballistic_exponent=1.35)
